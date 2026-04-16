@@ -64,10 +64,10 @@ class SectionService:
         context = "\n\n".join([doc["text"] for doc in results])
 
         prompt = f"""You are a legal document retrieval assistant.
+
 Your ONLY job is to find and return the text of the requested section from the context below.
 
-And give answer in not more than 100 words
-
+Give 
 
 Context:
 {context}

@@ -105,7 +105,7 @@ elif page == "📖 Section Lookup":
         submitted = st.form_submit_button("🔍 Lookup Section")
 
     if submitted and section_query.strip():
-        with st.spinner("Fetching exact section text..."):
+        with st.spinner("Fetching section "):
             try:
                 response = requests.post(SECTION_API_URL, json={"query": section_query})
                 response.raise_for_status()

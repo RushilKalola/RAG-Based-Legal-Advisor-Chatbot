@@ -65,7 +65,6 @@ class ChatService:
 Answer ONLY using the context provided below.
 Do not use any external knowledge or make assumptions beyond what is written.
 If the answer is not in the context, say "I could not find this in the provided legal documents."
-
 Context:
 {context}
 
