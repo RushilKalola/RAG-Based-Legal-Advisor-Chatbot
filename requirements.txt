@@ -43,4 +43,5 @@ bert-score==0.3.13
 ragas==0.1.21
 datasets==2.19.0
 
-
+langchain-mistralai
+langchain-core

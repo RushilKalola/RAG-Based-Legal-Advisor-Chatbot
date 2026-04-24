@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import chat, health, section
+from app.api.routes import chat, health, compare
 from app.utils.config import settings
 
 app = FastAPI(
@@ -22,7 +22,7 @@ app.add_middleware(
 # Routes
 app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(health.router, prefix="/health", tags=["Health"])
-app.include_router(section.router, prefix="/section", tags=["Section"])
+app.include_router(compare.router, prefix="/compare", tags=["Compare"])
 
 @app.get("/")
 def root():
@@ -31,5 +31,4 @@ def root():
         "environment": settings.APP_ENV
         
     }
-
 

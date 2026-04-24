@@ -1,13 +1,13 @@
 """
-RAG Evaluation Script — Chunk-level F1 + RAGAS (Chat & Section)
-================================================================
+RAG Evaluation Script — Chunk-level F1 + RAGAS (Chat & Act Comparison)
+=======================================================================
 Place in: RAG-Based-Legal-Advisor-Chatbot/eval.py
 
 Run:
-    python eval.py                     # chunk-level only (fast)
-    python eval.py --mode ragas        # RAGAS for chat
-    python eval.py --mode ragas_section  # RAGAS for section lookup
-    python eval.py --mode full         # everything
+    python eval.py                      # chunk-level only (fast)
+    python eval.py --mode ragas         # RAGAS for chat
+    python eval.py --mode ragas_compare # RAGAS for act comparison
+    python eval.py --mode full          # everything
 
 Install deps:
     pip install ragas==0.2.15 datasets langchain-mistralai==0.2.10 langchain-huggingface
@@ -22,257 +22,156 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
 
-# ── Adjust path so app/ is importable ────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
 
-from app.tools.legal_search_tool import LegalSearchTool
+# ✅ updated import
+from app.services.retrieval import RetrievalService
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # 1. EVAL DATASETS
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 @dataclass
 class EvalSample:
     query: str
     relevant_kw: list[str]
     ground_truth: str
-    fn_count: int = 0          # known false negatives (missed relevant chunks)
-    act: str = ""              # which PDF this should come from
+    fn_count: int = 0
+    act: str = ""
 
 
-# ── Chat eval dataset (open-ended legal questions) ────────────────────────────
+@dataclass
+class CompareEvalSample:
+    topic: str
+    act_a: str
+    act_b: str
+    relevant_kw_a: list[str]
+    relevant_kw_b: list[str]
+    ground_truth: str
+    fn_count_a: int = 0
+    fn_count_b: int = 0
+
+
 CHAT_EVAL_DATASET: list[EvalSample] = [
     EvalSample(
-        query="What is the punishment for murder under Bharatiya Nyaya Sanhita?",
-        relevant_kw=["murder", "death", "imprisonment for life", "culpable homicide"],
-        ground_truth=(
-            "Under the Bharatiya Nyaya Sanhita, whoever commits murder shall be "
-            "punished with death or imprisonment for life and shall also be liable to fine."
-        ),
-        fn_count=1,
-        act="Bharatiya Nyaya Sanhita.pdf",
+    query="What is the punishment for murder under Bharatiya Nyaya Sanhita?",
+    relevant_kw=["murder", "death", "imprisonment for life", "culpable homicide", "fine", "community service"],
+    ground_truth=(
+        "Under the Bharatiya Nyaya Sanhita, the punishments to which offenders are liable include "
+        "death, imprisonment for life, rigorous imprisonment with hard labour, simple imprisonment, "
+        "forfeiture of property, fine, and community service."
     ),
-    EvalSample(
-        query="Rights of an accused during trial under Code of Criminal Procedure",
-        relevant_kw=["fair trial", "accused", "defence", "legal aid", "bail", "right"],
-        ground_truth=(
-            "An accused person has the right to a fair trial, right to be represented "
-            "by a lawyer, right to bail in bailable offences, and right to be informed "
-            "of charges under the Code of Criminal Procedure."
-        ),
-        fn_count=2,
-        act="Code of Criminal Procedure.pdf",
+    fn_count=1,
+    act="Bharatiya Nyaya Sanhita.pdf",
+),
+EvalSample(
+    query="How to file a consumer complaint under Consumer Protection Act 2019?",
+    relevant_kw=["complaint", "consumer", "redressal", "District Collector", "Central Authority", "investigation", "Director General"],
+    ground_truth=(
+        "Under the Consumer Protection Act 2019, the District Collector may, on a complaint or on a "
+        "reference made by the Central Authority, take necessary action. The Director General submits "
+        "inquiries and investigations to the Central Authority in the prescribed form and manner."
     ),
-    EvalSample(
-        query="How to file a consumer complaint under Consumer Protection Act 2019?",
-        relevant_kw=["complaint", "consumer", "redressal", "commission", "filing", "district"],
-        ground_truth=(
-            "A consumer complaint can be filed before the District Consumer Disputes "
-            "Redressal Commission for claims up to one crore rupees. The complaint must "
-            "be filed within two years of the cause of action."
-        ),
-        fn_count=1,
-        act="Consumer Protection Act 2019.pdf",
+    fn_count=1,
+    act="Consumer Protection Act 2019.pdf",
+),
+EvalSample(
+    query="Motor vehicle accident compensation claim procedure",
+    relevant_kw=["accident", "compensation", "motor vehicle", "registering authority", "police station", "insurer", "claim", "section 161"],
+    ground_truth=(
+        "Under the Motor Vehicles Act, a registering authority or the officer in charge of a police "
+        "station shall, if required by a person claiming compensation or by an insurer, furnish "
+        "particulars of the vehicle involved in the accident on payment of the prescribed fee. "
+        "If an application for compensation is pending under section 161, the particulars of "
+        "compensation awarded shall be forwarded to the insurer."
     ),
-    EvalSample(
-        query="Penalties for hacking and unauthorized access under IT Act 2000",
-        relevant_kw=["hacking", "unauthorised access", "section 43", "penalty", "computer", "damage"],
-        ground_truth=(
-            "Section 43 of the Information Technology Act 2000 prescribes penalty and "
-            "compensation for unauthorized access, damage to computer systems, and "
-            "downloading or copying data without permission."
-        ),
-        fn_count=0,
-        act="Information Technology Act 2000.pdf",
+    fn_count=1,
+    act="The Motor Vehicles Act.pdf",
+),
+EvalSample(
+    query="What is the legal age to drive a car in India?",
+    relevant_kw=["driving licence", "age", "18 years", "16 years", "motor vehicle", "transport vehicle", "50cc"],
+    ground_truth=(
+        "Under the Motor Vehicles Act, no person under the age of eighteen years shall drive a motor "
+        "vehicle in any public place. A motorcycle with engine capacity not exceeding 50cc may be "
+        "driven by a person after attaining the age of sixteen years. No person under the age of "
+        "twenty years shall drive a transport vehicle in any public place."
     ),
-    EvalSample(
-        query="Director liability under Companies Act 2013",
-        relevant_kw=["director", "liability", "board", "company", "fiduciary", "duty"],
-        ground_truth=(
-            "Directors under the Companies Act 2013 have fiduciary duties towards the "
-            "company, its shareholders, and the public. They can be held personally "
-            "liable for fraudulent or wrongful acts committed in the name of the company."
-        ),
-        fn_count=1,
-        act="Companies Act 2013.pdf",
+    fn_count=1,
+    act="The Motor Vehicles Act.pdf",
+),
+EvalSample(
+    query="What is the procedure to file a civil suit in India?",
+    relevant_kw=["plaint", "civil suit", "jurisdiction", "summons", "appearance", "ten days", "decree", "Order XXXVII"],
+    ground_truth=(
+        "Under the Code of Civil Procedure 1908, a civil suit is instituted by presenting a plaint "
+        "to the court of competent jurisdiction. Once a suit is instituted, the court issues summons "
+        "to the defendant to enter appearance within ten days of service. If the defendant fails to "
+        "appear within ten days, the plaintiff is entitled to obtain a decree for the sum claimed."
     ),
-    EvalSample(
-        query="Fundamental rights guaranteed under Constitution of India",
-        relevant_kw=["fundamental rights", "article 14", "article 19", "article 21", "equality", "freedom"],
+    fn_count=1,
+    act="Code of Civil Procedure.pdf",
+),
+]
+
+COMPARE_EVAL_DATASET: list[CompareEvalSample] = [
+    CompareEvalSample(
+        topic="punishment for theft",
+        act_a="Bharatiya Nyaya Sanhita",
+        act_b="Information Technology Act",
+        relevant_kw_a=["theft", "dishonestly", "movable property", "imprisonment", "fine"],
+        relevant_kw_b=["theft", "data", "unauthorised access", "dishonestly", "imprisonment", "fine"],
         ground_truth=(
-            "Part III of the Constitution of India guarantees fundamental rights including "
-            "right to equality (Article 14), right to freedom (Article 19), right to life "
-            "and personal liberty (Article 21), and right to constitutional remedies (Article 32)."
+            "The Bharatiya Nyaya Sanhita defines theft as dishonest taking of movable property "
+            "and prescribes imprisonment and fine for the offence. The Information Technology Act "
+            "covers cyber theft such as unauthorised access to data and computer resources, "
+            "prescribing imprisonment and fine under its penal provisions."
         ),
-        fn_count=2,
-        act="Constitution of India.pdf",
+        fn_count_a=1,
+        fn_count_b=1,
     ),
-    EvalSample(
-        query="Motor vehicle accident compensation claim procedure",
-        relevant_kw=["accident", "compensation", "motor vehicle", "tribunal", "claim", "insurance"],
+    CompareEvalSample(
+        topic="bail provisions",
+        act_a="Code of Criminal Procedure",
+        act_b="Bharatiya Nyaya Sanhita",
+        relevant_kw_a=["bail", "bailable", "non-bailable", "court", "surety"],
+        relevant_kw_b=["bail", "bailable", "offence", "court", "release"],
         ground_truth=(
-            "Claims for motor vehicle accident compensation are filed before the Motor "
-            "Accidents Claims Tribunal. The claimant must prove negligence and the amount "
-            "of loss suffered. Insurance companies are liable to pay the awarded compensation."
+            "The Code of Criminal Procedure classifies offences as bailable and non-bailable. "
+            "For bailable offences bail is a right of the accused; for non-bailable offences "
+            "it is at the discretion of the court. The Bharatiya Nyaya Sanhita aligns with "
+            "these principles while updating certain terminology and procedures."
         ),
-        fn_count=1,
-        act="The Motor Vehicles Act.pdf",
+        fn_count_a=1,
+        fn_count_b=1,
     ),
-    EvalSample(
-        query="Rules of evidence admissibility under Indian Evidence Act",
-        relevant_kw=["evidence", "admissible", "relevance", "confession", "witness", "document"],
+    CompareEvalSample(
+        topic="compensation for motor accident",
+        act_a="Motor Vehicles Act",
+        act_b="Consumer Protection Act",
+        relevant_kw_a=["compensation", "tribunal", "accident", "insurance", "claim", "section 161"],
+        relevant_kw_b=["compensation", "consumer", "complaint", "redressal", "commission", "damages"],
         ground_truth=(
-            "Under the Indian Evidence Act, evidence must be relevant to the facts in issue "
-            "to be admissible. Confessions made to police officers are generally not admissible. "
-            "Documentary evidence must be proved by primary or secondary evidence."
+            "The Motor Vehicles Act provides a specialised Motor Accidents Claims Tribunal route "
+            "for accident compensation, where the registering authority or police station must "
+            "furnish vehicle particulars to the claimant or insurer on request. "
+            "The Consumer Protection Act provides redressal through District Consumer Disputes "
+            "Redressal Commissions for consumer grievances including those arising from deficient "
+            "services, with the District Collector empowered to act on complaints."
         ),
-        fn_count=1,
-        act="Indian Evidence Act.pdf",
-    ),
-    # ── Additional samples for better statistical reliability ─────────────────
-    EvalSample(
-        query="What is the procedure for filing a civil suit under Code of Civil Procedure?",
-        relevant_kw=["civil suit", "plaint", "court", "jurisdiction", "filing", "order"],
-        ground_truth=(
-            "A civil suit is filed by presenting a plaint to the court of competent jurisdiction. "
-            "The plaint must contain facts constituting the cause of action and the relief claimed."
-        ),
-        fn_count=1,
-        act="Code of Civil Procedure.pdf",
-    ),
-    EvalSample(
-        query="What are the data protection obligations under IT Act 2000?",
-        relevant_kw=["data", "protection", "sensitive", "personal information", "body corporate", "reasonable security"],
-        ground_truth=(
-            "Section 43A of the IT Act requires body corporates handling sensitive personal data "
-            "to maintain reasonable security practices. Failure to do so makes them liable to pay "
-            "compensation to affected persons."
-        ),
-        fn_count=1,
-        act="Information Technology Act 2000.pdf",
-    ),
-    EvalSample(
-        query="Rights of shareholders under Companies Act 2013",
-        relevant_kw=["shareholder", "dividend", "voting", "annual general meeting", "rights", "equity"],
-        ground_truth=(
-            "Shareholders under the Companies Act 2013 have the right to receive dividends, "
-            "vote at general meetings, inspect statutory registers, and receive annual reports. "
-            "They can also approach the tribunal for relief against oppression and mismanagement."
-        ),
-        fn_count=1,
-        act="Companies Act 2013.pdf",
-    ),
-    EvalSample(
-        query="Bail provisions for non-bailable offences under CrPC",
-        relevant_kw=["bail", "non-bailable", "court", "discretion", "session", "high court"],
-        ground_truth=(
-            "For non-bailable offences, bail is at the discretion of the court. The Sessions Court "
-            "or High Court may grant bail considering factors like nature of offence, evidence, "
-            "and likelihood of fleeing."
-        ),
-        fn_count=1,
-        act="Code of Criminal Procedure.pdf",
+        fn_count_a=1,
+        fn_count_b=1,
     ),
 ]
 
 
-# ── Section eval dataset (verbatim section lookup) ────────────────────────────
-SECTION_EVAL_DATASET: list[EvalSample] = [
-    EvalSample(
-        query="Article 21 Constitution of India",
-        relevant_kw=["life", "personal liberty", "procedure established by law"],
-        ground_truth=(
-            "No person shall be deprived of his life or personal liberty except "
-            "according to procedure established by law."
-        ),
-        fn_count=0,
-        act="Constitution of India.pdf",
-    ),
-    EvalSample(
-        query="Article 14 Constitution of India right to equality",
-        relevant_kw=["equality", "equal protection", "law", "territory of india"],
-        ground_truth=(
-            "The State shall not deny to any person equality before the law or the "
-            "equal protection of the laws within the territory of India."
-        ),
-        fn_count=0,
-        act="Constitution of India.pdf",
-    ),
-    EvalSample(
-        query="Section 43 Information Technology Act 2000 penalty",
-        relevant_kw=["penalty", "computer", "unauthorised access", "damages", "section 43"],
-        ground_truth=(
-            "Section 43 of the IT Act prescribes that if any person without permission "
-            "of the owner accesses or secures access to a computer, computer system or "
-            "computer network, he shall be liable to pay damages by way of compensation."
-        ),
-        fn_count=0,
-        act="Information Technology Act 2000.pdf",
-    ),
-    EvalSample(
-        query="Section 302 Bharatiya Nyaya Sanhita punishment for murder",
-        relevant_kw=["murder", "death", "imprisonment for life", "fine"],
-        ground_truth=(
-            "Whoever commits murder shall be punished with death or imprisonment for "
-            "life and shall also be liable to fine."
-        ),
-        fn_count=0,
-        act="Bharatiya Nyaya Sanhita.pdf",
-    ),
-    EvalSample(
-        query="Section 166 Motor Vehicles Act application for compensation",
-        relevant_kw=["compensation", "application", "claims tribunal", "accident", "motor vehicle"],
-        ground_truth=(
-            "An application for compensation arising out of an accident of the nature "
-            "specified in sub-section (1) of section 165 may be made by the person who "
-            "has sustained the injury or by the owner of the property."
-        ),
-        fn_count=0,
-        act="The Motor Vehicles Act.pdf",
-    ),
-    EvalSample(
-        query="Section 24 Consumer Protection Act 2019 jurisdiction of District Commission",
-        relevant_kw=["district commission", "jurisdiction", "one crore", "complaint", "consumer"],
-        ground_truth=(
-            "The District Commission shall have jurisdiction to entertain complaints where "
-            "the value of goods or services paid as consideration does not exceed one crore rupees."
-        ),
-        fn_count=0,
-        act="Consumer Protection Act 2019.pdf",
-    ),
-    EvalSample(
-        query="Section 3 Indian Evidence Act relevancy of facts",
-        relevant_kw=["relevancy", "facts", "evidence", "issue", "relevant"],
-        ground_truth=(
-            "One fact is said to be relevant to another when the one is connected with "
-            "the other in any of the ways referred to in the provisions of this Act "
-            "relating to the relevancy of facts."
-        ),
-        fn_count=0,
-        act="Indian Evidence Act.pdf",
-    ),
-    EvalSample(
-        query="Section 149 Companies Act 2013 composition of board of directors",
-        relevant_kw=["board", "directors", "company", "independent director", "composition"],
-        ground_truth=(
-            "Every company shall have a Board of Directors consisting of individuals as "
-            "directors and shall have a minimum number of three directors in the case of "
-            "a public company, two directors in the case of a private company."
-        ),
-        fn_count=0,
-        act="Companies Act 2013.pdf",
-    ),
-]
-
-
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 # 2. HELPERS
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 def is_relevant(chunk_text: str, keywords: list[str]) -> bool:
     text_lower = chunk_text.lower()
@@ -297,7 +196,6 @@ def grade(val: float) -> str:
 
 
 def save_results(results: dict, mode: str):
-    """Save results to eval_results/ folder for tracking improvement over time."""
     os.makedirs("eval_results", exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     filepath = f"eval_results/{timestamp}_{mode}.json"
@@ -308,11 +206,12 @@ def save_results(results: dict, mode: str):
     print(color(f"\n  Results saved → {filepath}", "cyan"))
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 3. CHUNK-LEVEL EVALUATION  (Precision / Recall / F1)
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# 3. CHUNK-LEVEL — CHAT
+# =============================================================================
 
-def evaluate_chunk_level(tool: LegalSearchTool, sample: EvalSample) -> dict:
+# ✅ updated type hint: LegalSearchTool → RetrievalService
+def evaluate_chunk_level(tool: RetrievalService, sample: EvalSample) -> dict:
     results = tool.search(sample.query)
 
     tp = sum(1 for r in results if is_relevant(r["text"], sample.relevant_kw))
@@ -327,13 +226,8 @@ def evaluate_chunk_level(tool: LegalSearchTool, sample: EvalSample) -> dict:
 
     scores = [r["score"] for r in results]
 
-    # Cross-document contamination check:
-    # how many retrieved chunks came from a WRONG act?
     if sample.act:
-        wrong_act_chunks = sum(
-            1 for r in results
-            if r.get("source", "") != sample.act
-        )
+        wrong_act_chunks   = sum(1 for r in results if r.get("source", "") != sample.act)
         contamination_rate = wrong_act_chunks / len(results) if results else 0.0
     else:
         contamination_rate = 0.0
@@ -367,7 +261,8 @@ def print_chunk_report(rows: list[dict], label: str = "CHAT") -> dict:
     for r in rows:
         q      = r["query"][:41]
         tpfpfn = f"{r['tp']}/{r['fp']}/{r['fn']}"
-        contam = color(f"{r['contamination_rate']*100:.1f}%", "red" if r["contamination_rate"] > 0.3 else "green")
+        contam = color(f"{r['contamination_rate']*100:.1f}%",
+                       "red" if r["contamination_rate"] > 0.3 else "green")
         print(
             f"{q:<42} {grade(r['precision']):>14} {grade(r['recall']):>14} "
             f"{grade(r['f1']):>14} {grade(r['accuracy']):>14} "
@@ -375,12 +270,12 @@ def print_chunk_report(rows: list[dict], label: str = "CHAT") -> dict:
         )
 
     print(sep)
-    macro_p     = sum(r["precision"]          for r in rows) / len(rows)
-    macro_r     = sum(r["recall"]             for r in rows) / len(rows)
-    macro_f1    = sum(r["f1"]                 for r in rows) / len(rows)
-    macro_acc   = sum(r["accuracy"]           for r in rows) / len(rows)
-    macro_sim   = sum(r["mean_score"]         for r in rows) / len(rows)
-    macro_cont  = sum(r["contamination_rate"] for r in rows) / len(rows)
+    macro_p    = sum(r["precision"]          for r in rows) / len(rows)
+    macro_r    = sum(r["recall"]             for r in rows) / len(rows)
+    macro_f1   = sum(r["f1"]                 for r in rows) / len(rows)
+    macro_acc  = sum(r["accuracy"]           for r in rows) / len(rows)
+    macro_sim  = sum(r["mean_score"]         for r in rows) / len(rows)
+    macro_cont = sum(r["contamination_rate"] for r in rows) / len(rows)
 
     print(
         f"{'MACRO AVERAGE':<42} {grade(macro_p):>14} {grade(macro_r):>14} "
@@ -390,7 +285,6 @@ def print_chunk_report(rows: list[dict], label: str = "CHAT") -> dict:
     print(sep)
     print(f"\n{color('Thresholds: green >= 0.80  |  yellow >= 0.60  |  red < 0.60', 'cyan')}\n")
 
-    # ── Diagnosis ─────────────────────────────────────────────────────────
     if macro_p > macro_r + 0.15:
         print(color("Diagnosis: High precision but low recall.", "yellow"))
         print("  → Lower SCORE_THRESHOLD or raise TOP_K_RESULTS in .env\n")
@@ -399,7 +293,7 @@ def print_chunk_report(rows: list[dict], label: str = "CHAT") -> dict:
         print("  → Raise SCORE_THRESHOLD to filter noisy chunks\n")
     elif macro_cont > 0.25:
         print(color("Diagnosis: High cross-document contamination.", "red"))
-        print("  → Add act-level metadata filtering in LegalSearchTool.search()\n")
+        print("  → Add act-level metadata filtering in RetrievalService.search()\n")
     elif macro_f1 < 0.60:
         print(color("Diagnosis: Both precision and recall are low.", "red"))
         print("  → Fix chunking strategy (RecursiveCharacterTextSplitter, size=800, overlap=150)\n")
@@ -409,19 +303,142 @@ def print_chunk_report(rows: list[dict], label: str = "CHAT") -> dict:
         print("  → Run --mode ragas to evaluate answer quality\n")
 
     return {
-        "macro_p":    macro_p,
-        "macro_r":    macro_r,
-        "macro_f1":   macro_f1,
-        "macro_acc":  macro_acc,
-        "macro_cont": macro_cont,
+        "macro_p": macro_p, "macro_r": macro_r,
+        "macro_f1": macro_f1, "macro_acc": macro_acc, "macro_cont": macro_cont,
     }
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 4. RAGAS — CHAT SERVICE
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# 4. CHUNK-LEVEL — ACT COMPARISON (dual-leg)
+# =============================================================================
 
-def evaluate_ragas_chat(tool: LegalSearchTool, samples: list[EvalSample]) -> dict:
+# ✅ updated type hint: LegalSearchTool → RetrievalService
+def evaluate_chunk_level_compare(tool: RetrievalService, sample: CompareEvalSample) -> dict:
+    def _eval_leg(query: str, kw: list[str], expected_act: str, fn_count: int) -> dict:
+        results   = tool.search(query)
+        tp        = sum(1 for r in results if is_relevant(r["text"], kw))
+        fp        = len(results) - tp
+        fn        = fn_count
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall    = tp / (tp + fn) if (tp + fn) > 0 else 1.0
+        f1        = (2 * precision * recall / (precision + recall)
+                     if (precision + recall) > 0 else 0.0)
+        scores    = [r["score"] for r in results]
+
+        act_kw = expected_act.lower().split()
+        wrong  = sum(
+            1 for r in results
+            if not any(kw in r.get("source", "").lower() for kw in act_kw)
+        )
+        contamination_rate = wrong / len(results) if results else 0.0
+
+        return {
+            "retrieved": len(results),
+            "tp": tp, "fp": fp, "fn": fn,
+            "precision":          round(precision, 4),
+            "recall":             round(recall, 4),
+            "f1":                 round(f1, 4),
+            "mean_score":         round(sum(scores) / len(scores), 4) if scores else 0.0,
+            "contamination_rate": round(contamination_rate, 4),
+            "sources":            list({r["source"] for r in results}),
+        }
+
+    leg_a = _eval_leg(f"{sample.topic} {sample.act_a}", sample.relevant_kw_a,
+                      sample.act_a, sample.fn_count_a)
+    leg_b = _eval_leg(f"{sample.topic} {sample.act_b}", sample.relevant_kw_b,
+                      sample.act_b, sample.fn_count_b)
+
+    return {
+        "topic":         sample.topic,
+        "act_a":         sample.act_a,
+        "act_b":         sample.act_b,
+        "leg_a":         leg_a,
+        "leg_b":         leg_b,
+        "avg_f1":        round((leg_a["f1"]        + leg_b["f1"])        / 2, 4),
+        "avg_precision": round((leg_a["precision"] + leg_b["precision"]) / 2, 4),
+        "avg_recall":    round((leg_a["recall"]    + leg_b["recall"])    / 2, 4),
+        "avg_contam":    round((leg_a["contamination_rate"] +
+                                leg_b["contamination_rate"]) / 2, 4),
+    }
+
+
+def print_compare_chunk_report(rows: list[dict]) -> dict:
+    sep = "-" * 110
+    print(f"\n{color('CHUNK-LEVEL EVALUATION — ACT COMPARISON (dual-leg retrieval)', 'bold')}")
+    print(sep)
+    hdr = (f"{'Topic':<30} {'Act':<32} {'P':>6} {'R':>6} {'F1':>6} "
+           f"{'AvgSim':>8} {'Contam%':>9} {'TP/FP/FN':>10}")
+    print(color(hdr, "cyan"))
+    print(sep)
+
+    for r in rows:
+        topic = r["topic"][:29]
+        for leg_key, act_name in [("leg_a", r["act_a"]), ("leg_b", r["act_b"])]:
+            leg    = r[leg_key]
+            act    = act_name[:31]
+            tpfpfn = f"{leg['tp']}/{leg['fp']}/{leg['fn']}"
+            contam = color(
+                f"{leg['contamination_rate']*100:.1f}%",
+                "red" if leg["contamination_rate"] > 0.3 else "green"
+            )
+            print(
+                f"{topic:<30} {act:<32} {grade(leg['precision']):>14} "
+                f"{grade(leg['recall']):>14} {grade(leg['f1']):>14} "
+                f"{leg['mean_score']:>8.3f} {contam:>17} {tpfpfn:>10}"
+            )
+            topic = ""
+
+        avg_contam_str = color(
+            f"{r['avg_contam']*100:.1f}%",
+            "red" if r["avg_contam"] > 0.3 else "green"
+        )
+        print(
+            f"  {'↳ Dual-leg avg':<60} {grade(r['avg_precision']):>14} "
+            f"{grade(r['avg_recall']):>14} {grade(r['avg_f1']):>14} "
+            f"{'':>8} {avg_contam_str:>17}"
+        )
+        print()
+
+    print(sep)
+    macro_p    = sum(r["avg_precision"] for r in rows) / len(rows)
+    macro_r    = sum(r["avg_recall"]    for r in rows) / len(rows)
+    macro_f1   = sum(r["avg_f1"]        for r in rows) / len(rows)
+    macro_cont = sum(r["avg_contam"]    for r in rows) / len(rows)
+
+    print(
+        f"{'MACRO AVERAGE (dual-leg)':<64} {grade(macro_p):>14} "
+        f"{grade(macro_r):>14} {grade(macro_f1):>14} "
+        f"{'':>8} {macro_cont*100:>8.1f}%"
+    )
+    print(sep)
+    print(f"\n{color('Thresholds: green >= 0.80  |  yellow >= 0.60  |  red < 0.60', 'cyan')}\n")
+
+    if macro_cont > 0.30:
+        print(color("Diagnosis: High cross-act contamination in comparison retrieval.", "red"))
+        print("  → The keyword filter in _search_for_act() is too loose.")
+        print("  → Consider adding act-level metadata to Qdrant payloads for exact filtering.\n")
+    elif macro_f1 < 0.60:
+        print(color("Diagnosis: Low F1 on both legs — retrieval misses relevant chunks.", "red"))
+        print("  → Lower SCORE_THRESHOLD or raise TOP_K_RESULTS in .env\n")
+    elif macro_p > macro_r + 0.15:
+        print(color("Diagnosis: Good precision but low recall on comparison queries.", "yellow"))
+        print("  → Raise TOP_K_RESULTS so more chunks per act are fetched.\n")
+    else:
+        print(color("Diagnosis: Comparison retrieval quality looks healthy.", "green"))
+        print("  → Run --mode ragas_compare to evaluate structured output quality.\n")
+
+    return {
+        "macro_p": macro_p, "macro_r": macro_r,
+        "macro_f1": macro_f1, "macro_cont": macro_cont,
+    }
+
+
+# =============================================================================
+# 5. RAGAS — CHAT SERVICE
+# =============================================================================
+
+# ✅ updated type hint: LegalSearchTool → RetrievalService
+def evaluate_ragas_chat(tool: RetrievalService, samples: list[EvalSample]) -> dict:
     try:
         from datasets import Dataset
         from ragas import evaluate
@@ -430,7 +447,7 @@ def evaluate_ragas_chat(tool: LegalSearchTool, samples: list[EvalSample]) -> dic
         from ragas.embeddings import LangchainEmbeddingsWrapper
         from langchain_mistralai import ChatMistralAI
         from langchain_huggingface import HuggingFaceEmbeddings
-        from app.services.chat_services import ChatService
+        from app.tools.chat_tool import ChatTool  # ✅ use ChatTool instead of ChatService
     except ImportError as e:
         print(color(f"  Missing dependency: {e}", "red"))
         return {}
@@ -439,20 +456,17 @@ def evaluate_ragas_chat(tool: LegalSearchTool, samples: list[EvalSample]) -> dic
     print("  Building dataset...\n")
 
     mistral_api_key = os.getenv("MISTRAL_API_KEY", "")
-    llm = LangchainLLMWrapper(ChatMistralAI(
-        model="mistral-small-2506",
-        mistral_api_key=mistral_api_key,
-    ))
+    llm = LangchainLLMWrapper(ChatMistralAI(model="mistral-small-2506",
+                                             mistral_api_key=mistral_api_key))
     embeddings = LangchainEmbeddingsWrapper(HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-mpnet-base-v2"
-    ))
+        model_name="sentence-transformers/all-mpnet-base-v2"))
 
     metrics = [faithfulness, answer_relevancy, context_recall, context_precision]
     for m in metrics:
-        m.llm        = llm
-        m.embeddings = embeddings
+        m.llm = llm; m.embeddings = embeddings
 
-    service = ChatService()
+    # ✅ use ChatTool instead of ChatService
+    chat_tool = ChatTool()
     data    = {"question": [], "answer": [], "contexts": [], "ground_truth": []}
     DELAY   = float(os.getenv("EVAL_REQUEST_DELAY", "6.0"))
 
@@ -460,34 +474,27 @@ def evaluate_ragas_chat(tool: LegalSearchTool, samples: list[EvalSample]) -> dic
         print(f"  [{i+1}/{len(samples)}] {sample.query[:65]}...")
         results  = tool.search(sample.query)
         contexts = [r["text"] for r in results]
-
-        answer = _call_with_retry(
+        answer   = _call_with_retry(
             lambda: asyncio.get_event_loop().run_until_complete(
-                service.get_answer(sample.query)
-            )["answer"]
-        )
-
+                chat_tool.ask(sample.query))["answer"])  # ✅ chat_tool.ask()
         if answer is None:
-            print(color(f"    Skipping — could not get answer.", "red"))
-            continue
-
+            print(color("    Skipping — could not get answer.", "red")); continue
         data["question"].append(sample.query)
         data["answer"].append(answer)
         data["contexts"].append(contexts)
         data["ground_truth"].append(sample.ground_truth)
-
         if i < len(samples) - 1:
-            print(f"    Waiting {DELAY:.0f}s...")
-            time.sleep(DELAY)
+            print(f"    Waiting {DELAY:.0f}s..."); time.sleep(DELAY)
 
     return _run_ragas_and_print(data, metrics, llm, embeddings, label="CHAT")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 5. RAGAS — SECTION SERVICE  (new — was never evaluated before)
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# 6. RAGAS — ACT COMPARISON SERVICE
+# =============================================================================
 
-def evaluate_ragas_section(tool: LegalSearchTool, samples: list[EvalSample]) -> dict:
+# ✅ updated type hint: LegalSearchTool → RetrievalService
+def evaluate_ragas_compare(tool: RetrievalService, samples: list[CompareEvalSample]) -> dict:
     try:
         from datasets import Dataset
         from ragas import evaluate
@@ -496,66 +503,72 @@ def evaluate_ragas_section(tool: LegalSearchTool, samples: list[EvalSample]) -> 
         from ragas.embeddings import LangchainEmbeddingsWrapper
         from langchain_mistralai import ChatMistralAI
         from langchain_huggingface import HuggingFaceEmbeddings
-        from app.services.section_services import SectionService
+        from app.tools.act_comparison_tool import ActComparisonTool
+        from app.services.comparison_service import ComparisonService
     except ImportError as e:
         print(color(f"  Missing dependency: {e}", "red"))
         return {}
 
-    print(f"\n{color('RAGAS — SECTION SERVICE  (verbatim section extraction)', 'bold')}")
+    print(f"\n{color('RAGAS — ACT COMPARISON SERVICE  (structured dual-act comparison)', 'bold')}")
     print("  Building dataset...\n")
 
     mistral_api_key = os.getenv("MISTRAL_API_KEY", "")
-    llm = LangchainLLMWrapper(ChatMistralAI(
-        model="mistral-small-2506",
-        mistral_api_key=mistral_api_key,
-    ))
+    llm = LangchainLLMWrapper(ChatMistralAI(model="mistral-small-2506",
+                                             mistral_api_key=mistral_api_key))
     embeddings = LangchainEmbeddingsWrapper(HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-mpnet-base-v2"
-    ))
+        model_name="sentence-transformers/all-mpnet-base-v2"))
 
     metrics = [faithfulness, answer_relevancy, context_recall, context_precision]
     for m in metrics:
-        m.llm        = llm
-        m.embeddings = embeddings
+        m.llm = llm; m.embeddings = embeddings
 
-    service = SectionService()
-    data    = {"question": [], "answer": [], "contexts": [], "ground_truth": []}
-    DELAY   = float(os.getenv("EVAL_REQUEST_DELAY", "6.0"))
+    act_tool = ActComparisonTool()
+    service  = ComparisonService()
+    data     = {"question": [], "answer": [], "contexts": [], "ground_truth": []}
+    DELAY    = float(os.getenv("EVAL_REQUEST_DELAY", "6.0"))
 
     for i, sample in enumerate(samples):
-        print(f"  [{i+1}/{len(samples)}] {sample.query[:65]}...")
-        results  = tool.search(sample.query)
-        contexts = [r["text"] for r in results]
+        print(f"  [{i+1}/{len(samples)}] {sample.topic} | {sample.act_a} vs {sample.act_b}...")
 
-        # SectionService.get_section() is async — use event loop
+        results_a = service._search_for_act(sample.topic, sample.act_a)
+        results_b = service._search_for_act(sample.topic, sample.act_b)
+        contexts  = [r["text"] for r in results_a] + [r["text"] for r in results_b]
+
+        # ✅ use ActComparisonTool instead of ComparisonService directly
         answer = _call_with_retry(
-            lambda: asyncio.get_event_loop().run_until_complete(
-                service.get_section(sample.query)
-            )["answer"]
+            lambda s=sample: asyncio.get_event_loop().run_until_complete(
+                act_tool.compare(s.topic, s.act_a, s.act_b)
+            )["comparison"]
         )
-
         if answer is None:
-            print(color(f"    Skipping — could not get answer.", "red"))
-            continue
+            print(color("    Skipping — could not get comparison.", "red")); continue
 
-        data["question"].append(sample.query)
+        question = f"Compare {sample.act_a} and {sample.act_b} on the topic: {sample.topic}"
+        data["question"].append(question)
         data["answer"].append(answer)
         data["contexts"].append(contexts)
         data["ground_truth"].append(sample.ground_truth)
 
         if i < len(samples) - 1:
-            print(f"    Waiting {DELAY:.0f}s...")
-            time.sleep(DELAY)
+            print(f"    Waiting {DELAY:.0f}s..."); time.sleep(DELAY)
 
-    return _run_ragas_and_print(data, metrics, llm, embeddings, label="SECTION")
+    result = _run_ragas_and_print(data, metrics, llm, embeddings, label="COMPARE")
+
+    if result.get("faithfulness", 1.0) < 0.85:
+        print(color(
+            "⚠  Comparison faithfulness low — Mistral may be inventing provisions "
+            "not present in the retrieved chunks.", "red"
+        ))
+        print("  → Tighten the comparison prompt: reinforce 'Do not invent provisions'.\n")
+
+    return result
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 6. SHARED HELPERS FOR RAGAS
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# 7. SHARED RAGAS HELPERS
+# =============================================================================
 
 def _call_with_retry(fn, max_retries: int = 3) -> str | None:
-    """Call fn() with exponential backoff on rate-limit errors."""
     for attempt in range(max_retries):
         try:
             return fn()
@@ -578,7 +591,7 @@ def _run_ragas_and_print(data: dict, metrics, llm, embeddings, label: str) -> di
         print(color("  No samples processed — aborting.", "red"))
         return {}
 
-    dataset = Dataset.from_dict(data)
+    dataset     = Dataset.from_dict(data)
     print(f"\n  Running RAGAS for {label} ({len(data['question'])} samples)...\n")
     result      = evaluate(dataset, metrics=metrics, llm=llm, embeddings=embeddings)
     scores_dict = result._repr_dict
@@ -605,51 +618,36 @@ def _run_ragas_and_print(data: dict, metrics, llm, embeddings, label: str) -> di
 
     print(sep)
 
-    # ── Per-metric diagnosis ──────────────────────────────────────────────
-    faith = out.get("faithfulness", 1.0)
-    recall = out.get("context_recall", 1.0)
+    faith     = out.get("faithfulness", 1.0)
+    recall    = out.get("context_recall", 1.0)
     precision = out.get("context_precision", 1.0)
 
     if faith < 0.85:
         print(color("\n⚠  Low faithfulness — LLM is going beyond the retrieved context.", "red"))
-        print("   → Tighten the system prompt: 'Answer ONLY from the context below.'")
-        print("   → Add a negative instruction: 'Do NOT use prior legal knowledge.'\n")
     else:
         print(color("\n✓  Faithfulness healthy — answers grounded in retrieved context.\n", "green"))
-
     if recall < 0.80:
         print(color("⚠  Context recall low — retriever is missing relevant passages.", "red"))
-        print("   → Lower SCORE_THRESHOLD to 0.40 in .env")
-        print("   → Raise TOP_K_RESULTS to 12")
-        print("   → Fix chunking: RecursiveCharacterTextSplitter(size=800, overlap=150)\n")
-
     if precision < 0.75:
         print(color("⚠  Context precision low — too many irrelevant chunks retrieved.", "red"))
-        print("   → Add act-level metadata filtering in LegalSearchTool")
-        print("   → Re-ingest with 'act_name' payload field\n")
-
-    if label == "SECTION" and faith < 0.90:
-        print(color("⚠  Section service needs higher faithfulness (target ≥ 0.90).", "yellow"))
-        print("   → Remove the 100-word cap from the section prompt")
-        print("   → Prompt must say: 'Return the exact section text — do NOT paraphrase.'\n")
 
     return out
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# 7. MAIN
-# ═════════════════════════════════════════════════════════════════════════════
+# =============================================================================
+# 8. MAIN
+# =============================================================================
 
 def main():
     parser = argparse.ArgumentParser(description="RAG Legal Chatbot Evaluator")
     parser.add_argument(
         "--mode",
-        choices=["chunk", "ragas", "ragas_section", "full"],
+        choices=["chunk", "ragas", "ragas_compare", "full"],
         default="chunk",
         help=(
-            "chunk          → fast retrieval-level F1 (default)\n"
+            "chunk          → fast retrieval-level F1 for chat + comparison (default)\n"
             "ragas          → RAGAS for Chat service\n"
-            "ragas_section  → RAGAS for Section service\n"
+            "ragas_compare  → RAGAS for Act Comparison service\n"
             "full           → all of the above"
         ),
     )
@@ -659,36 +657,29 @@ def main():
     print(f"  Embedding model  : {os.getenv('EMBEDDING_MODEL', 'see .env')}")
     print(f"  Score threshold  : {os.getenv('SCORE_THRESHOLD', '0.50')}")
     print(f"  Top-K results    : {os.getenv('TOP_K_RESULTS', '10')}")
+    print(f"  RERANK_TOP_K     : {os.getenv('RERANK_TOP_K', '1')}")
     print(f"  Chat samples     : {len(CHAT_EVAL_DATASET)}")
-    print(f"  Section samples  : {len(SECTION_EVAL_DATASET)}\n")
+    print(f"  Compare samples  : {len(COMPARE_EVAL_DATASET)}\n")
 
-    tool        = LegalSearchTool()
+    # ✅ RetrievalService instead of LegalSearchTool
+    tool        = RetrievalService()
     all_results = {}
 
-    # ── Always run chunk-level (fast, no extra deps) ──────────────────────
     print(color("─── CHAT RETRIEVAL ───────────────────────────────────", "magenta"))
-    chat_rows = [evaluate_chunk_level(tool, s) for s in CHAT_EVAL_DATASET]
-    chat_chunk = print_chunk_report(chat_rows, label="CHAT")
-    all_results["chunk_chat"] = chat_chunk
+    all_results["chunk_chat"] = print_chunk_report(
+        [evaluate_chunk_level(tool, s) for s in CHAT_EVAL_DATASET], label="CHAT")
 
-    print(color("─── SECTION RETRIEVAL ────────────────────────────────", "magenta"))
-    sec_rows = [evaluate_chunk_level(tool, s) for s in SECTION_EVAL_DATASET]
-    sec_chunk = print_chunk_report(sec_rows, label="SECTION")
-    all_results["chunk_section"] = sec_chunk
+    print(color("─── ACT COMPARISON RETRIEVAL (dual-leg) ──────────────", "magenta"))
+    all_results["chunk_compare"] = print_compare_chunk_report(
+        [evaluate_chunk_level_compare(tool, s) for s in COMPARE_EVAL_DATASET])
 
-    # ── RAGAS — Chat ──────────────────────────────────────────────────────
     if args.mode in ("ragas", "full"):
-        ragas_chat = evaluate_ragas_chat(tool, CHAT_EVAL_DATASET)
-        all_results["ragas_chat"] = ragas_chat
+        all_results["ragas_chat"] = evaluate_ragas_chat(tool, CHAT_EVAL_DATASET)
 
-    # ── RAGAS — Section ───────────────────────────────────────────────────
-    if args.mode in ("ragas_section", "full"):
-        ragas_section = evaluate_ragas_section(tool, SECTION_EVAL_DATASET)
-        all_results["ragas_section"] = ragas_section
+    if args.mode in ("ragas_compare", "full"):
+        all_results["ragas_compare"] = evaluate_ragas_compare(tool, COMPARE_EVAL_DATASET)
 
-    # ── Save results ──────────────────────────────────────────────────────
     save_results(all_results, args.mode)
-
     print(color("\n=== Evaluation complete ===\n", "bold"))
 
 

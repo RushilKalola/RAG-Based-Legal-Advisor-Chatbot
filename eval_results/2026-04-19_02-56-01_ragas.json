@@ -1,0 +1,19 @@
+{
+  "chunk_chat": {
+    "macro_p": 0.8263916666666667,
+    "macro_r": 0.9052250000000001,
+    "macro_f1": 0.8562249999999999,
+    "macro_acc": 0.758025,
+    "macro_cont": 0.2916666666666667
+  },
+  "chunk_section": {
+    "macro_p": 0.7361,
+    "macro_r": 1.0,
+    "macro_f1": 0.8284833333333333,
+    "macro_acc": 0.7361,
+    "macro_cont": 0.25001666666666666
+  },
+  "ragas_chat": {},
+  "timestamp": "2026-04-19_02-56-01",
+  "mode": "ragas"
+}

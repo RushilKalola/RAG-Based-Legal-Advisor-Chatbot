@@ -31,8 +31,10 @@ class Settings:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     # Retrieval
-    TOP_K_RESULTS: int = int(os.getenv("TOP_K_RESULTS", 10))
-    SCORE_THRESHOLD: float = float(os.getenv("SCORE_THRESHOLD", 0.50))
+    TOP_K_RESULTS: int = int(os.getenv("TOP_K_RESULTS", 12))
+    SCORE_THRESHOLD: float = float(os.getenv("SCORE_THRESHOLD", 0.40))
+    RERANK_TOP_K: int = int(os.getenv("RERANK_TOP_K", 5))
+    
 
 
 # Create a global settings object

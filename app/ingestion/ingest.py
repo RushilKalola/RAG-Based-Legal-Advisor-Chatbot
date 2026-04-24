@@ -92,7 +92,6 @@ class IngestionPipeline:
             "chunks_indexed": len(points)
         }
 
-
 # ✅ Runner (so you can execute directly)
 if __name__ == "__main__":
     pipeline = IngestionPipeline()

@@ -1,0 +1,29 @@
+{
+  "chunk_chat": {
+    "macro_p": 1.0,
+    "macro_r": 0.8523400000000001,
+    "macro_f1": 0.9202999999999999,
+    "macro_acc": 0.8523400000000001,
+    "macro_cont": 0.0
+  },
+  "chunk_compare": {
+    "macro_p": 1.0,
+    "macro_r": 0.8571,
+    "macro_f1": 0.9231000000000001,
+    "macro_cont": 0.4166666666666667
+  },
+  "ragas_chat": {
+    "faithfulness": 0.8162280701754385,
+    "answer_relevancy": 0.9088240267613698,
+    "context_recall": 0.6666666666666666,
+    "context_precision": 0.5466666666291111
+  },
+  "ragas_compare": {
+    "faithfulness": 0.8233766233766234,
+    "answer_relevancy": 0.8745730893575229,
+    "context_recall": 0.38888888888888884,
+    "context_precision": 0.06666666666
+  },
+  "timestamp": "2026-04-22_10-14-33",
+  "mode": "full"
+}

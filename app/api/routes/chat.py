@@ -1,11 +1,11 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.services.chat_services import ChatService
+from app.tools.chat_tool import ChatTool
 
 router = APIRouter()
 
-chat_service = ChatService()
+chat_tool = ChatTool()
 
 
 # Request schema
@@ -22,7 +22,7 @@ class ChatResponse(BaseModel):
 @router.post("/", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     try:
-        result = await chat_service.get_answer(request.query)
+        result = await chat_tool.ask(request.query)
 
         return ChatResponse(
             answer=result["answer"],

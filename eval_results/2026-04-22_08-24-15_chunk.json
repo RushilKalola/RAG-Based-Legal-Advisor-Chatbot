@@ -1,0 +1,17 @@
+{
+  "chunk_chat": {
+    "macro_p": 0.975,
+    "macro_r": 0.88612,
+    "macro_f1": 0.92796,
+    "macro_acc": 0.86668,
+    "macro_cont": 0.125
+  },
+  "chunk_compare": {
+    "macro_p": 0.9583333333333334,
+    "macro_r": 0.8836,
+    "macro_f1": 0.9176666666666667,
+    "macro_cont": 0.4166666666666667
+  },
+  "timestamp": "2026-04-22_08-24-15",
+  "mode": "chunk"
+}
