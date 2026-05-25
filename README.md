@@ -311,7 +311,6 @@ Latest evaluation scores (from `eval_results/2026-04-24_09-22-31_full.json`):
 | Faithfulness | 0.933 | 0.846 |
 | Answer Relevancy | 0.908 | 0.866 |
 | Context Recall | 1.000 | 0.722 |
-| Context Precision | 0.840 | 0.167 |
 
 To run evaluation:
 ```bash
